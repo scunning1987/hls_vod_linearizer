@@ -19,8 +19,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-Summary: This script is designed to parse an MPEG DASH manifest, and based on user input, find valid
-breakpoints that can be used in AWS Elemental MediaTailor - Channel Assembly
+Summary: This script is designed to create a linear HLS playlist using VOD content
 
 Original Author: Scott Cunningham
 '''
