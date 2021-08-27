@@ -1,0 +1,78 @@
+#### CF Template 1
+## Parameters - User Input
+Parameters:
+  DeploymentName:
+    Description: This is the name of the deployment
+    Type: String
+    MinLength: 1
+
+  # CloudFront Distribution Domain Name
+  # CloudFront Path Prefix to S3
+
+## Resources
+Resources:
+#
+# DynamoDB
+# Tables: 00000_Clients (client_id (String)) 00000_ContentLibrary (assetname (String)) 00000_ContentManagement (endtimeepoch (Number))
+  ClientDB:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: 00000_Clients
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: client_id
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: client_id
+          AttributeType: S
+
+  ContentLibraryDB:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: 00000_ContentLibrary
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: assetname
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: assetname
+          AttributeType: S
+
+  ContentManagementDB:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: 00000_ContentManagement
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: endtimeepoch
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: endtimeepoch
+          AttributeType: N
+
+#
+# Lambda
+#
+## Content Ingest to DB
+## Linearizer
+
+
+#
+# API Gateway
+#
+## Proxy API Endpoint
+
+
+#
+# EventBridge
+#
+## Events for EMC job completion (that follow a certain TAG)
+
+#################################
+# Outputs
+#################################
+
+Outputs:
+  Test:
+    Description: test
+    Value: test
