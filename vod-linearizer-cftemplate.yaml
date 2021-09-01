@@ -16,14 +16,10 @@ Parameters:
     AllowedPattern: ^arn:aws:iam::.+ #(\d{12}|aws):policy/:+
     Default: arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
 
-  #CloudFrontDistributionDomainName:
-  #  Description: Enter the base name of the CloudFront distribution that will be used
-  # Type: String
-
-  #CloudFrontBehaviorPathToS3Media:
-  #  Description: Enter the CloudFront behavior path to the VOD assets
-  #  Type: String
-
+  CloudFrontDistributionDomainName:
+    Description: Enter the base name of the CloudFront distribution that will be used
+    Type: String
+    Default: mydistribution.net
 
 ## Resources
 Resources:
@@ -33,7 +29,7 @@ Resources:
   ClientDB:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: 00000_Clients
+      TableName: 00001_Clients
       BillingMode: PAY_PER_REQUEST
       KeySchema:
         - AttributeName: client_id
@@ -45,7 +41,7 @@ Resources:
   ContentLibraryDB:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: 00000_ContentLibrary
+      TableName: 00001_ContentLibrary
       BillingMode: PAY_PER_REQUEST
       KeySchema:
         - AttributeName: assetname
@@ -57,7 +53,7 @@ Resources:
   ContentManagementDB:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: 00000_ContentManagement
+      TableName: 00001_ContentManagement
       BillingMode: PAY_PER_REQUEST
       KeySchema:
         - AttributeName: endtimeepoch
@@ -88,39 +84,50 @@ Resources:
           Value: !Ref AWS::StackName
 
     ## IAM Policy
-    S3AccessPolicy:
-      Type: AWS::IAM::Policy
-      Properties:
-        Roles:
-          - !Ref LambdaRole
-        PolicyName: !Sub ${AWS::StackName}-s3-access
-        PolicyDocument:
-          Statement:
-            - Effect: Allow
-              Action:
-                - s3:*
-              Resource:
-                - !Sub arn:aws:s3:::${S3BucketDeployedByVodSolution}/*
-            - Effect: Allow
-              Action:
-                - s3:*
-              Resource:
-                - !Sub arn:aws:s3:::${S3BucketDeployedByVodSolution}
-            - Effect: Allow
-              Action:
-                - logs:CreateLogGroup
-              Resource:
-                - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
-
-  LambdaInvokePermissionAPIGateway:
-    Type: AWS::Lambda::Permission
+  CustomPoliciesForLambda:
+    Type: AWS::IAM::Policy
     Properties:
-      FunctionName: !GetAtt VodLinearizer.Arn
-      Action: lambda:InvokeFunction
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/*"
-    DependsOn:
-      - VodLinearizer
+      Roles:
+        - !Ref LambdaRole
+      PolicyName: !Sub ${AWS::StackName}-s3-access
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:*
+            Resource:
+              - !Sub arn:aws:s3:::${S3BucketDeployedByVodSolution}/*
+          - Effect: Allow
+            Action:
+              - s3:*
+            Resource:
+              - !Sub arn:aws:s3:::${S3BucketDeployedByVodSolution}
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+            Resource:
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+          - Effect: Allow
+            Action:
+              - dynamodb:*
+            Resource:
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/*_Clients
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/*_ContentLibrary
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/*_ContentManagement
+              # replace above with :
+              #  !GetAtt ClientDB.Arn
+              #  !GetAtt ContentLibraryDB.Arn
+              #  !GetAtt ContentManagementDB.Arn
+
+  #LambdaInvokePermissionAPIGateway:
+  #  Type: AWS::Lambda::Permission
+  #  Properties:
+  #    FunctionName: !GetAtt VodLinearizer.Arn
+  #    Action: lambda:InvokeFunction
+  #    Principal: apigateway.amazonaws.com
+  #    SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/*"
+  #  DependsOn:
+  #    - VodLinearizer
 
 #################
 ## Custom Resource
@@ -138,11 +145,48 @@ Resources:
 ## Linearizer // vod content ingest // file loaders
 
   VodLinearizer:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Function that creates a linear playlist from VOD playlist sources
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.8
+      Handler: index.lambda_handler
+      Timeout: 10
+      MemorySize: 10240
+      Code:
+        S3Bucket: !Ref S3BucketDeployedByVodSolution
+        S3Key: !GetAtt FileMover.hls_vod_linearizer
+      Tags:
+        - Key: StackName
+          Value: !Ref AWS::StackName
+      DependsOn:
+        - LambdaRole
+        - FileCopier
+        - FileMover
 
 
-
-  VodContentIngest:
-
+  VodContentIngest: # Adapt lambda for MediaConvert trigger. get tags also
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Function that parses the HLS manifest to calculate Asset length and other details
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.8
+      Handler: index.lambda_handler
+      Timeout: 10
+      MemorySize: 10240
+      Code:
+        S3Bucket: !Ref S3BucketDeployedByVodSolution
+        S3Key: !GetAtt FileMover.vod-content-ingest
+      Environment:
+        Variables:
+          CONTENT_MANAGEMENT_DB: !Ref ContentLibraryDB
+      Tags:
+        - Key: StackName
+          Value: !Ref AWS::StackName
+      DependsOn:
+        - LambdaRole
+        - FileCopier
+        - FileMover
 
   FileCopier:
     Type: AWS::Lambda::Function
@@ -214,7 +258,7 @@ Resources:
               apiendpoint = os.environ['APIENDPOINT']
 
               # Manifest File containning URL's on github
-              cloudformation_manifest = "https://raw.githubusercontent.com/scunning1987/aws_projects/main/377/manifest.txt"
+              cloudformation_manifest = "https://raw.githubusercontent.com/scunning1987/hls_vod_linearizer/main/manifest.txt?token=APANGKASX2JDVYSIRPQU5DLBFBW3U"
 
               # Get the manifest from GitHub
               get_response = http.request('GET', cloudformation_manifest)
@@ -328,15 +372,15 @@ Resources:
         - Key: StackName
           Value: !Ref AWS::StackName
     DependsOn:
-      - S3Bucket
       - LambdaRole
-      - S3AccessPolicy
+      - CustomPoliciesForLambda
 
 
 #
 # API Gateway
 #
 ## Proxy API Endpoint
+
 
 
 #
