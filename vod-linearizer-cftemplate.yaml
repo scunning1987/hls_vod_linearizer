@@ -233,7 +233,7 @@ Resources:
           import urllib3
           from urllib.parse import urlparse
           from zipfile import ZipFile
-          import cfnresponse
+          #import cfnresponse
 
           LOGGER = logging.getLogger()
           LOGGER.setLevel(logging.INFO)
@@ -241,128 +241,138 @@ Resources:
 
           def lambda_handler(event, context):
 
-              ## Log the incoming event
-              LOGGER.info("Event : %s " % (event))
+            ## Log the incoming event
+            LOGGER.info("Event : %s " % (event))
 
-              ## Create Response Data Dictionary for the CloudFormationn response
-              responseData = dict()
+            ## Create Response Data Dictionary for the CloudFormationn response
+            responseData = dict()
 
-              ## Initialize S3 boto3 client
-              s3 = boto3.client('s3')
+            ## Initialize S3 boto3 client
+            s3 = boto3.client('s3')
 
-              # Create urllib3 pool manager
-              http = urllib3.PoolManager()
+            # Create urllib3 pool manager
+            http = urllib3.PoolManager()
 
-              # environment variables
-              bucket = os.environ['BUCKET']
-              apiendpoint = os.environ['APIENDPOINT']
+            # environment variables
+            bucket = os.environ['BUCKET']
+            apiendpoint = os.environ['APIENDPOINT']
 
-              # Manifest File containning URL's on github
-              cloudformation_manifest = "https://raw.githubusercontent.com/scunning1987/hls_vod_linearizer/main/manifest.txt?token=APANGKASX2JDVYSIRPQU5DLBFBW3U"
+            # Manifest File containning URL's on github
+            cloudformation_manifest = "https://raw.githubusercontent.com/scunning1987/hls_vod_linearizer/main/manifest.txt"
 
-              # Get the manifest from GitHub
+            # Get the manifest from GitHub
+            try:
               get_response = http.request('GET', cloudformation_manifest)
+            except:
+              responseData['Status'] = "HTTP call to get manifest failed"
+              cfnresponse.send(event, context, "FAILED",responseData)
+              raise Exception("HTTP call to get manifest failed")
 
-              if get_response.status != 200:
-                  # Exit the script with errors
-                  responseData['Status'] = "Unable to get file from location : %s " % (file)
-                  cfnresponse.send(event, context, "FAILED",responseData)
-                  raise Exception("Unable to get file from location : %s " % (file))
-              else:
-                  # Continue and upload to S3
-                  manifest_list = get_response.data.decode("utf-8").split("\n")
+            if get_response.status != 200:
+                # Exit the script with errors
+                responseData['Status'] = "Unable to get file from location : %s " % (cloudformation_manifest)
+                cfnresponse.send(event, context, "FAILED",responseData)
+                raise Exception("Unable to get file from location : %s " % (cloudformation_manifest))
+            else:
+                # Continue and upload to S3
+                manifest_list = get_response.data.decode("utf-8").split("\n")
 
-              # remove manifest.txt header line
-              manifest_list.pop(0)
+            # remove manifest.txt header line
+            manifest_list.pop(0)
 
-              LOGGER.info("Files to transfer to S3: %s " % (manifest_list))
+            LOGGER.info("Files to transfer to S3: %s " % (manifest_list))
 
-              for file in manifest_list:
+            for file in manifest_list:
 
-                  # Get the file from GitHub
-                  if "http" in file:
-                      get_response = http.request('GET', file)
+                # Get the file from GitHub
+                if "http" in file:
+                  try:
+                    get_response = http.request('GET', file)
+                  except:
+                    responseData['Status'] = "HTTP call to get file failed"
+                    cfnresponse.send(event, context, "FAILED",responseData)
+                    raise Exception("HTTP call to get file failed")
 
-                  if get_response.status != 200:
-                      # Exit the script with errors
-                      responseData['Status'] = "Unable to get file from location : %s " % (file)
-                      cfnresponse.send(event, context, "FAILED",responseData)
-                      raise Exception("Unable to get file from location : %s " % (file))
-                  elif "http" in file:
+                if get_response.status != 200:
+                    # Exit the script with errors
+                    responseData['Status'] = "Unable to get file from location : %s " % (file)
+                    #cfnresponse.send(event, context, "FAILED",responseData)
+                    raise Exception("Unable to get file from location : %s " % (file))
+                elif "http" in file:
 
-                      # Continue and upload to S3
+                    # Continue and upload to S3
 
-                      # url string to urllib object
-                      file_url_formatted = urlparse(file)
-                      file_url_path = file_url_formatted.path
+                    # url string to urllib object
+                    file_url_formatted = urlparse(file)
+                    file_url_path = file_url_formatted.path
 
-                      # get path after github repo owner name - use this as the path to write to s3
-                      path = '/'.join(file_url_path.split("/")[2:]).rsplit("/",1)[0]
-                      s3_data = get_response.data
+                    # get path after github repo owner name - use this as the path to write to s3
+                    path = '/'.join(file_url_path.split("/")[2:]).rsplit("/",1)[0]
+                    s3_data = get_response.data
 
 
-                      file_name = file.rsplit("/",1)[1]
-                      file_base_name = os.path.splitext(file_name)[0]
-                      s3_key = "%s/%s" % (path,file_name)
+                    file_name = file.rsplit("/",1)[1]
+                    file_base_name = os.path.splitext(file_name)[0]
+                    s3_key = "%s/%s" % (path,file_name)
 
-                      content_type = ""
-                      if ".html" in file_name:
-                          content_type = "text/html"
-                      elif ".css" in file_name:
-                          content_type = "text/css"
-                      elif ".js" in file_name:
-                          content_type = "text/javascript"
-                      elif ".json" in file_name:
-                          content_type = "application/json"
-                      elif ".zip" in file_name: # this is the zip
-                          content_type = "application/zip"
-                          s3_key = path + file_name
-                      elif ".py" in file_name:
-                          # write python file to zip,
-                          python_file = open("/tmp/"+file_name,"w")
-                          python_file.write(get_response.data.decode("utf-8"))
-                          python_file.close()
+                    content_type = ""
+                    if ".html" in file_name:
+                        content_type = "text/html"
+                    elif ".css" in file_name:
+                        content_type = "text/css"
+                    elif ".js" in file_name:
+                        content_type = "text/javascript"
+                    elif ".json" in file_name:
+                        content_type = "application/json"
+                    elif ".zip" in file_name: # this is the zip
+                        content_type = "application/zip"
+                        s3_key = path + file_name
+                    elif ".py" in file_name:
+                        # write python file to zip,
+                        python_file = open("/tmp/"+file_name,"w")
+                        python_file.write(get_response.data.decode("utf-8"))
+                        python_file.close()
 
-                          # Zip the file
-                          LOGGER.info("Zipping the file : %s " % ("/tmp/"+file_name))
-                          zipObj = ZipFile('/tmp/'+file_name.replace(".py",".zip"), 'w')
-                          # Add file to the zip
-                          zipObj.write('/tmp/'+file_name,"index.py")
-                          # close the Zip File
-                          zipObj.close()
-                          LOGGER.info("Finished zipping file")
+                        # Zip the file
+                        LOGGER.info("Zipping the file : %s " % ("/tmp/"+file_name))
+                        zipObj = ZipFile('/tmp/'+file_name.replace(".py",".zip"), 'w')
+                        # Add file to the zip
+                        zipObj.write('/tmp/'+file_name,"index.py")
+                        # close the Zip File
+                        zipObj.close()
+                        LOGGER.info("Finished zipping file")
 
-                          content_type = "application/zip"
-                          s3_data = open("/tmp/"+file_name.replace(".py",".zip"), 'rb')
-                          s3_key = s3_key.replace(".py",".zip")
+                        content_type = "application/zip"
+                        s3_data = open("/tmp/"+file_name.replace(".py",".zip"), 'rb')
+                        s3_key = s3_key.replace(".py",".zip")
 
-                      # "RequestType": "Create"
-                      if event['RequestType'] == "Create" or event['RequestType'] == "Update":
-                          # Upload to S3
-                          LOGGER.info("Now uploading %s to S3, Bucket: %s , path: %s" % (file_name,bucket,s3_key))
-                          try:
-                              s3_response = s3.put_object(Body=s3_data, Bucket=bucket, Key=s3_key,ContentType=content_type, CacheControl='no-cache')
-                              LOGGER.info("Uploaded %s to S3, got response : %s " % (file_name,s3_response) )
-                              responseData[file_base_name] = s3_key
-                          except Exception as e:
-                              LOGGER.error("Unable to upload %s to S3, got exception: %s" % (file_name,e))
-                              responseData['Status'] = "Unable to upload %s to S3, got exception: %s" % (file_name,e)
-                              cfnresponse.send(event, context, "FAILED",responseData)
-                              raise Exception("Unable to upload %s to S3, got exception: %s" % (file_name,e))
+                    # "RequestType": "Create"
+                    if event['RequestType'] == "Create" or event['RequestType'] == "Update":
+                        # Upload to S3
+                        LOGGER.info("Now uploading %s to S3, Bucket: %s , path: %s" % (file_name,bucket,s3_key))
+                        try:
+                            s3_response = s3.put_object(Body=s3_data, Bucket=bucket, Key=s3_key,ContentType=content_type, CacheControl='no-cache')
+                            LOGGER.info("Uploaded %s to S3, got response : %s " % (file_name,s3_response) )
+                            responseData[file_base_name] = s3_key
+                        except Exception as e:
+                            LOGGER.error("Unable to upload %s to S3, got exception: %s" % (file_name,e))
+                            responseData['Status'] = "Unable to upload %s to S3, got exception: %s" % (file_name,e)
+                            #cfnresponse.send(event, context, "FAILED",responseData)
+                            raise Exception("Unable to upload %s to S3, got exception: %s" % (file_name,e))
 
-                      else: # DELETE
-                          try:
-                              s3_response = s3.delete_object(Bucket=bucket,Key=s3_key)
-                              LOGGER.info("Deleted %s from S3, got response : %s " % (file_name,s3_response) )
-                          except Exception as e:
-                              LOGGER.error("Unable to delete %s from S3, got exception: %s" % (file_name,e))
-                              responseData['Status'] = "Unable to delete %s from S3, got exception: %s" % (file_name,e)
-                              cfnresponse.send(event, context, "FAILED",responseData)
-                  else:
-                      LOGGER.info("Got line in manifest.txt that isn't a URL: %s " % (file))
-              responseData['Status'] = "SUCCESS"
-              cfnresponse.send(event, context, "SUCCESS",responseData)
-              return responseData
+                    else: # DELETE
+                        try:
+                            s3_response = s3.delete_object(Bucket=bucket,Key=s3_key)
+                            LOGGER.info("Deleted %s from S3, got response : %s " % (file_name,s3_response) )
+                        except Exception as e:
+                            LOGGER.error("Unable to delete %s from S3, got exception: %s" % (file_name,e))
+                            responseData['Status'] = "Unable to delete %s from S3, got exception: %s" % (file_name,e)
+                            #cfnresponse.send(event, context, "FAILED",responseData)
+                else:
+                    LOGGER.info("Got line in manifest.txt that isn't a URL: %s " % (file))
+            responseData['Status'] = "SUCCESS"
+            #cfnresponse.send(event, context, "SUCCESS",responseData)
+            return responseData
 
       Environment:
         Variables:
