@@ -17,7 +17,7 @@ Parameters:
     Default: arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
 
   CloudFrontDistributionDomainName:
-    Description: Enter the base name of the CloudFront distribution that will be used
+    Description: Enter the base name of the CloudFront distribution that will be used to serve the content
     Type: String
     Default: mydistribution.net
 

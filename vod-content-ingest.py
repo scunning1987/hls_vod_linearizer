@@ -26,30 +26,14 @@ def lambda_handler(event, context):
     db_client = boto3.client('dynamodb')
     s3_client = boto3.client('s3')
 
+    # create exceptions list to capture all exceptions throughout function
+    exceptions = []
+    exceptions.clear()
 
-    def createItem(name, location, duration, segments):
-        LOGGER.info("Running DB Put Item function, item primary key is : %s " % (name))
+    def createItem(db,item):
+        LOGGER.info("Running DB Put Item function, item primary key is : %s " % (asset_name))
         ## Put Item
-        response = db_client.put_item(
-            TableName=db_contentlibrary,
-            Item={
-                "assetlocation": {
-                    "S": location
-                },
-                "assetname": {
-                    "S": name
-                },
-                "duration": {
-                    "S": duration
-                },
-                "segments": {
-                    "S": segments
-                },
-                "genre": {
-                    "S": "demo"
-                }
-            }
-        )
+        response = db_client.put_item(TableName=db,Item=item)
         return response
 
     ##
@@ -64,6 +48,7 @@ def lambda_handler(event, context):
             response = s3_client.get_object(Bucket=asset_bucket,Key=asset_playlist_key)
         except Exception as e:
             LOGGER.error("Unable to get object from S3, got exception: %s " % (e))
+            exceptions.append("Unable to get object from S3, got exception: %s " % (e))
 
 
         asset_playlist_manifest = response['Body'].read().decode('utf-8')
@@ -125,10 +110,103 @@ def lambda_handler(event, context):
     duration = str(filedetails['duration'][0]['duration'])
     segments = str(filedetails['segments'][0]['segments'])
 
+    item_for_content_library = {
+        "assetlocation": {
+            "S": asset_url
+        },
+        "assetname": {
+            "S": asset_name
+        },
+        "duration": {
+            "S": duration
+        },
+        "segments": {
+            "S": segments
+        },
+        "genre": {
+            "S": "demo"
+        }
+    }
+
     if duration == 0:
         LOGGER.error("Error getting asset information or parsing manifest correctly")
         raise Exception("Error getting asset information or parsing manifest correctly")
     else:
         LOGGER.info("Creating a new DB Item for asset")
-        response = createItem(asset_name, asset_url, duration, segments)
-        return response
+        response = createItem(db_contentlibrary,item_for_content_library)
+
+
+    # Now make sure this new asset is playing out from now
+    # 1. Check Content Management DB to see if there is currently an asset playing
+    # IF FOUND : Recreate the currently playing asset to end in epoch time now, then currently playing asset
+    #            Create new asset playing now until end of time
+    # IF NOT FOUND: Create new asset playing now until end of time
+
+
+    try:
+        get_item_response = db_client.get_item(TableName=db_contentmanagement,Key={"endtimeepoch":{"N":"999999999999"}})
+        LOGGER.info("Got existing now Playing item...")
+        LOGGER.debug("Response from current playing item check : %s " % (get_item_response))
+    except Exception as e:
+        exceptions.append("Unable to get item from DB, got exception : %s " % (e))
+        get_item_response = ""
+        LOGGER.debug("Unable to get item from DB, got exception : %s " % (e))
+
+    if "Item" in get_item_response:
+        nowPlaying = get_item_response['Item']
+        nowPlayingPrimaryKey = nowPlaying['endtimeepoch']['N']
+
+        nowPlaying['endtimeepoch']['N'] = str(int(datetime.datetime.utcnow().strftime('%s')))
+        nowPlayingToLast = nowPlaying
+
+        try:
+            # delete item 999999998
+            delete_item_response = db_client.delete_item(TableName=db_contentmanagement,Key={"endtimeepoch":{"N":"999999999999"}})
+            LOGGER.info("Current now playing item has been deleted")
+        except Exception as e:
+            LOGGER.error("Unable to delete current now playing item, got exception: %s " % (e))
+            exceptions.append("Unable to delete current now playing item, got exception: %s " % (e))
+
+        try:
+            createItem(db_contentmanagement,nowPlayingToLast)
+            LOGGER.info("Creating a new schedule item for the previous asset")
+        except Exception as e:
+            LOGGER.error("Unable to create new schedule entry for the old now playing item, got exception: %s " % (e))
+            exceptions.append("Unable to create new schedule entry for the old now playing item, got exception: %s " % (e))
+
+
+    endtime = "999999999999"
+
+    newPlayingItem = {
+        "endtimeepoch": {
+            "N": endtime
+        },
+        "assetname": {
+            "S": asset_name
+        },
+        "segments": {
+            "N": segments
+        },
+        "assetlocation": {
+            "S": asset_url
+        },
+        "duration": {
+            "N": duration
+        },
+        "genre": {
+            "S": "demo"
+        }
+    }
+
+    try:
+        newItemResponse = createItem(db_contentmanagement,newPlayingItem)
+        LOGGER.info("Created new DB item in schedule for asset : %s " % (asset_name))
+        LOGGER.debug("Response for creating new now playing item : %s " % (newItemResponse))
+    except Exception as e:
+        LOGGER.error("Unable to create new playlist item: %s " % (e))
+        raise Exception("Unable to create new playlist item: %s " % (e))
+
+    return {
+        "status":"COMPLETE",
+        "exceptions": exceptions
+    }

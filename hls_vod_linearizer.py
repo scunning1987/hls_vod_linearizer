@@ -30,7 +30,6 @@ import boto3
 import time
 import datetime
 import uuid
-import requests
 import os
 import math
 
@@ -51,6 +50,9 @@ def lambda_handler(event, context):
     db_client = boto3.client('dynamodb')
     sliding_window = int(os.environ['SLIDING_WINDOW'])
     cdn_base_url = os.environ['CDN']
+
+    # initialize s3 boto cliennt
+    s3_client = boto3.client('s3')
 
     ## Functions ## START ##
 
@@ -79,6 +81,7 @@ def lambda_handler(event, context):
             exceptions.append("#EXT-X-STATUS: UNABLE TO GET CLIENT INFO FROM DATABASE, GOT EXCEPTION %s" % (str(e).upper()))
             return "#EXT-X-STATUS: UNABLE TO GET CLIENT INFO FROM DATABASE, GOT EXCEPTION %s" % (str(e).upper())
         return get_item_response
+
     # Function to create an item in the db for client tracking
     def dbCreateClient(clients_db,client_id,requesttime_epoch):
         LOGGER.debug("Doing a call to Dynamo to create client info")
@@ -94,21 +97,29 @@ def lambda_handler(event, context):
         LOGGER.debug("Doing a call to Dynamo to get portion on playlist returned")
         # db.scan with filters and conditions
 
+    # New master manifest builder
     def master_manifest_constructor(assetinfo,client_id):
         asseturl = assetinfo['AssetLocation']
-        master_manifest_get_response = requests.get(url = asseturl)
-        if master_manifest_get_response.status_code != 200:
+        asset_bucket = asseturl.split("/")[2]
+        asset_key = '/'.join(asseturl.split("/")[3:])
+        path_to_object = asseturl.rsplit("/",1)[0] + "/"
+
+        try:
+            LOGGER.info("Getting object from S3")
+            response = s3_client.get_object(Bucket=asset_bucket,Key=asset_key)
+        except Exception as e:
+            LOGGER.error("Unable to get object from S3, got exception: %s " % (e))
+            exceptions.append("Unable to get object from S3, got exception: %s " % (e))
             return errorOut("#EXT-X-STATUS: ERROR - UNABLE TO GET MASTER MANIFEST FROM ORIGIN")
 
-        master_manifest_original = master_manifest_get_response.text
+        master_manifest_original = response['Body'].read().decode('utf-8')
 
-        urlonly = asseturl.rsplit('/', 1)[0] + "/"
         rendition_list = []
         rendition_number = 0
         for line in master_manifest_original.split('\n'):
             if ".m3u8" in line:
                 master_manifest_original = master_manifest_original.replace(line,"%s/%s.m3u8" % (channel_name,rendition_number))
-                rendition_list.append(urlonly+line)
+                rendition_list.append(path_to_object+line)
                 rendition_number += 1
         master_manifest_client_id = master_manifest_original.replace(".m3u8",".m3u8?client_id=%s" % (client_id))
         return {"master_manifest_client_id":master_manifest_client_id,"rendition_list":rendition_list}
@@ -139,6 +150,39 @@ def lambda_handler(event, context):
                 # this captures all files that have been in the schedule since session start...
                 #
 
+                # Get manifest
+                # Get master manifest
+                master_manifest = master_manifest_constructor(item,"xxx")
+                child_full_url =  master_manifest['rendition_list'][rendition_number]
+
+                asset_bucket = child_full_url.split("/")[2]
+                asset_key = '/'.join(child_full_url.split("/")[3:])
+                path_to_segments = '/'.join(child_full_url.split("/")[3:]).rsplit("/",1)[0] + "/"
+
+                if len(cdn_base_url) > 6:
+                    # assume CDN is being used:
+                    cdn_no_protocol = cdn_base_url.replace("https://","").replace("http://","")
+
+                    child_url = "https://%s/%s" % (cdn_no_protocol,path_to_segments)
+                else:
+                    # assume clients can get directly from S3
+                    bucket_region = "us-west-2"
+                    child_url = "https://%s.s3.%s.amazonaws.com/%s" (asset_bucket,bucket_region,path_to_segments)
+
+
+                try:
+                    LOGGER.info("Getting object from S3")
+                    response = s3_client.get_object(Bucket=asset_bucket,Key=asset_key)
+                except Exception as e:
+                    LOGGER.error("Unable to get object from S3, got exception: %s " % (e))
+                    exceptions.append("Unable to get object from S3, got exception: %s " % (e))
+                    return errorOut("#EXT-X-STATUS: ERROR - UNABLE TO GET MASTER MANIFEST FROM ORIGIN")
+
+                childmanifestraw = response['Body'].read().decode('utf-8')
+
+                child_url = child_full_url.rsplit('/', 1)[0] + "/"
+
+
                 if endtimeepoch < time_window_start:
 
                     LOGGER.debug("This is a scheduled item that has long since lapsed. need to calculate Media Sequence")
@@ -155,16 +199,9 @@ def lambda_handler(event, context):
                     extinfstart = []
                     extinfstart.clear()
 
-                    # Get master manifest
-                    master_manifest = master_manifest_constructor(item,"xxx")
-                    child_full_url =  master_manifest['rendition_list'][rendition_number]
-                    child_url = child_full_url.rsplit('/', 1)[0] + "/"
-
-                    # Get child manifest
-                    childmanifestraw = requests.get(url = child_full_url)
 
                     manifest_timeline = 0
-                    for index, line in enumerate(childmanifestraw.text.split("#")):
+                    for index, line in enumerate(childmanifestraw.split("#")):
                         if 'EXTINF' in line:
                             extinfstart.append(index)
                             manifest_timeline = manifest_timeline + int(line.split(",")[0].split(":")[1])
@@ -181,6 +218,7 @@ def lambda_handler(event, context):
 
                     assetstartepoch = endtimeepoch
                     total_loops += loops_since_asset_start+1
+
 
                 if endtimeepoch > time_window_start and endtimeepoch <= time_window_end:
 
@@ -202,14 +240,6 @@ def lambda_handler(event, context):
                     extinfstart = []
                     extinfstart.clear()
                     #return manifest_start
-
-                    # Get master manifest
-                    master_manifest = master_manifest_constructor(item,"xxx")
-                    child_full_url =  master_manifest['rendition_list'][rendition_number]
-                    child_url = child_full_url.rsplit('/', 1)[0] + "/"
-
-                    # Get child manifest
-                    childmanifestraw = requests.get(url = child_full_url)
 
                     manifest_timeline = 0
                     media_sequence += starting_media_sequence_of_last_loop
@@ -240,7 +270,7 @@ def lambda_handler(event, context):
                     manifest_timeline = 0
                     segment_index.clear()
                     extinfstart.clear()
-                    for index, line in enumerate(childmanifestraw.text.split("#")):
+                    for index, line in enumerate(childmanifestraw.split("#")):
                         if 'EXTINF' in line:
                             extinfstart.append(index)
                             manifest_timeline = manifest_timeline + int(line.split(",")[0].split(":")[1])
@@ -278,13 +308,6 @@ def lambda_handler(event, context):
 
                     time_watching = requesttime_epoch - sliding_window - session_start_epoch
 
-                    # Get master manifest
-                    master_manifest = master_manifest_constructor(item,"xxx")
-                    child_full_url =  master_manifest['rendition_list'][rendition_number]
-                    child_url = child_full_url.rsplit('/', 1)[0] + "/"
-
-                    # Get child manifest
-                    childmanifestraw = requests.get(url = child_full_url)
 
                     if manifest_start < 0 and len(older_child_manifest) == 0 and time_watching > 0:
 
@@ -293,7 +316,7 @@ def lambda_handler(event, context):
                         old_manifest_start = duration + manifest_start
                         old_manifest_end = duration
 
-                        for index, line in enumerate(childmanifestraw.text.split("#")):
+                        for index, line in enumerate(childmanifestraw.split("#")):
                             if 'EXTINF' in line:
                                 extinfstart.append(index)
                                 manifest_timeline = manifest_timeline + int(line.split(",")[0].split(":")[1])
@@ -334,7 +357,7 @@ def lambda_handler(event, context):
                                 old_loop_end = duration
                                 extinfstart.clear()
 
-                                for index, line in enumerate(childmanifestraw.text.split("#")):
+                                for index, line in enumerate(childmanifestraw.split("#")):
                                     if 'EXTINF' in line:
                                         extinfstart.append(index)
                                         manifest_timeline = manifest_timeline + int(line.split(",")[0].split(":")[1])
@@ -351,7 +374,7 @@ def lambda_handler(event, context):
                         manifest_timeline = 0
                         extinfstart.clear()
                         manifest_timeline = 0
-                        for index, line in enumerate(childmanifestraw.text.split("#")):
+                        for index, line in enumerate(childmanifestraw.split("#")):
                             if 'EXTINF' in line:
                                 extinfstart.append(index)
                                 manifest_timeline = manifest_timeline + int(line.split(",")[0].split(":")[1])
