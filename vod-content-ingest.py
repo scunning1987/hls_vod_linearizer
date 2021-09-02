@@ -1,5 +1,5 @@
 '''
-This script will calculate media duration and number of segments from an https origin
+This script will calculate media duration and number of segments of an asset from S3
 '''
 import json
 import boto3
@@ -7,36 +7,31 @@ import datetime
 import math
 import os
 from botocore.vendored import requests
+import logging
+
+LOGGER = logging.getLogger()
+LOGGER.setLevel(logging.INFO)
 
 def lambda_handler(event, context):
 
-    # manual method for testing purposes. This should be CloudWatch event driven after successful ingest into MediaPackage
-    assets_to_ingest = [
-        'https://e4276182346b9b6a5929cba3cb0886df.egress.mediapackage-vod.us-west-2.amazonaws.com/out/v1/c7c4eb122fc34c41b25d3b6e4e493d89/f03bf4fca60b403a83344c8bf85b4cca/4727555785ba442cb60d1d555b960546/index.m3u8',
-        'https://e4276182346b9b6a5929cba3cb0886df.egress.mediapackage-vod.us-west-2.amazonaws.com/out/v1/726a7ffc554b4b03aa964b5657a6b38e/f03bf4fca60b403a83344c8bf85b4cca/4727555785ba442cb60d1d555b960546/index.m3u8',
-        'https://e4276182346b9b6a5929cba3cb0886df.egress.mediapackage-vod.us-west-2.amazonaws.com/out/v1/c06ec96ff4884b5d85dfc3ea7f370cc0/f03bf4fca60b403a83344c8bf85b4cca/4727555785ba442cb60d1d555b960546/index.m3u8'
-    ]
+    LOGGER.info("Received event : %s " % (event))
 
-    db_name = os.environ['CONTENT_MANAGEMENT_DB']
+    db_contentmanagement = os.environ['CONTENT_MANAGEMENT_DB']
+    db_contentlibrary = os.environ['CONTENT_LIBRARY_DB']
 
-    client = boto3.client('dynamodb')
+    LOGGER.info("Content management database : %s " % (db_contentmanagement))
+    LOGGER.info("Content library database %s " % (db_contentlibrary))
 
-    def getTables():
-        ## List DynamoDB Tables
-        response = client.list_tables(
-            Limit=10
-        )
-        return response
+    # Initialize AWS service boto3 clients#
+    db_client = boto3.client('dynamodb')
+    s3_client = boto3.client('s3')
 
-    ## Get Items
-    def getItems():
-        response = client.scan(TableName=db_name)
-        return response
 
     def createItem(name, location, duration, segments):
+        LOGGER.info("Running DB Put Item function, item primary key is : %s " % (name))
         ## Put Item
-        response = client.put_item(
-            TableName=db_name,
+        response = db_client.put_item(
+            TableName=db_contentlibrary,
             Item={
                 "assetlocation": {
                     "S": location
@@ -58,29 +53,28 @@ def lambda_handler(event, context):
         return response
 
     ##
-    def durationCalculator(asseturl):
-        #
-        # get asset from s3 master manifest
-        #
-
-        urlonly = asseturl.rsplit('/', 1)[0] + "/"
-        childlist = []
-
-        # sending get request and saving the response as response object 
-        mastermanifest = requests.get(url = asseturl)
-
-        for line in mastermanifest.text.split('\n'):
-            if ".m3u8" in line:
-                childlist.append(urlonly+line)
-
+    def durationCalculator(asset_bucket,asset_playlist_key):
+        LOGGER.info("Running durationCalculator function")
         #
         # get child manifest / playlist and work out total duration
-        #  
-        childmanifestraw = requests.get(url = str(childlist[0]))
+        #
+
+        try:
+            LOGGER.info("Getting object from S3")
+            response = s3_client.get_object(Bucket=asset_bucket,Key=asset_playlist_key)
+        except Exception as e:
+            LOGGER.error("Unable to get object from S3, got exception: %s " % (e))
+
+
+        asset_playlist_manifest = response['Body'].read().decode('utf-8')
+        LOGGER.debug("Child playlist contents : %s " % (asset_playlist_manifest))
+
         duration = 0
         segments = 0
         filedetails = dict()
-        for line in childmanifestraw.text.split("#"):
+
+        LOGGER.info("Iterating through manifest to get segmennt count and duration")
+        for line in asset_playlist_manifest.split("#"):
             if 'EXTINF' in line:
                 segments = segments + 1
                 duration = duration + float(line.split(",")[0].split(":")[1])
@@ -88,23 +82,53 @@ def lambda_handler(event, context):
         segments = [{'segments': segments}]
         filedetails['duration'] = duration
         filedetails['segments'] = segments
-        print(filedetails)
+
+        LOGGER.info("Completed analysis of playlist: %s " % (filedetails))
         return filedetails
 
-    for asseturl in assets_to_ingest:
-
-        assetname = asseturl.rsplit("/",1)[-1].rsplit('.', 1)[0]
-
-        assetname = 'slate_60'
-        asseturl = 'https://e4276182346b9b6a5929cba3cb0886df.egress.mediapackage-vod.us-west-2.amazonaws.com/out/v1/c06ec96ff4884b5d85dfc3ea7f370cc0/f03bf4fca60b403a83344c8bf85b4cca/4727555785ba442cb60d1d555b960546/index.m3u8'
 
 
-        filedetails = durationCalculator(asseturl)
-        duration = str(filedetails['duration'][0]['duration'])
-        segments = str(filedetails['segments'][0]['segments'])
+    # Pull event json outputgroupdetails dict to variable
+    outputGroups = event['detail']['outputGroupDetails']
+    LOGGER.debug("MediaConvert complete event - output group details : %s " % (outputGroups))
 
-        if duration == 0:
-            return "error getting asset information"
-        else:
-            response = createItem(assetname, asseturl, duration, segments)
-            return response
+    # iterate through outputs (to account for multiple output groups). Assume first hit HLS_GROUP is what we want to use
+    for outputGroup in outputGroups:
+
+        # pull type to variable
+        type = outputGroup['type']
+
+        # If type is HLS_GROUP then capture the URL details and analyze length
+        if type == "HLS_GROUP":
+            LOGGER.info("Found HLS Group in event output")
+            # HLS S3 URI
+            asset_url = outputGroup['playlistFilePaths'][0]
+
+            # iterate through playlist files and get s3 uri for a video rendition
+            outputGroupDetails = outputGroup['outputDetails']
+
+            for outputGroupDetail in outputGroupDetails:
+                if "videoDetails" in outputGroupDetail:
+                    asset_playlist_url = outputGroupDetail['outputFilePaths'][0]
+
+    asset_name = asset_url.split("/")[-1].replace(".m3u8","")
+    LOGGER.info("Asset Name: %s " % (asset_name))
+
+    # parse asset_playlist_url to bucket and s3 key path
+    asset_bucket = asset_playlist_url.split("/")[2]
+    asset_playlist_key = '/'.join(asset_playlist_url.split("/")[3:])
+    LOGGER.info("Asset bucket: %s " % (asset_bucket))
+    LOGGER.info("Asset playlist key: %s " % (asset_playlist_key))
+
+    filedetails = durationCalculator(asset_bucket,asset_playlist_key)
+
+    duration = str(filedetails['duration'][0]['duration'])
+    segments = str(filedetails['segments'][0]['segments'])
+
+    if duration == 0:
+        LOGGER.error("Error getting asset information or parsing manifest correctly")
+        raise Exception("Error getting asset information or parsing manifest correctly")
+    else:
+        LOGGER.info("Creating a new DB Item for asset")
+        response = createItem(asset_name, asset_url, duration, segments)
+        return response

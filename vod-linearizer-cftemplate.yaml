@@ -29,7 +29,7 @@ Resources:
   ClientDB:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: 00001_Clients
+      TableName: 00002_Clients
       BillingMode: PAY_PER_REQUEST
       KeySchema:
         - AttributeName: client_id
@@ -41,7 +41,7 @@ Resources:
   ContentLibraryDB:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: 00001_ContentLibrary
+      TableName: 00002_ContentLibrary
       BillingMode: PAY_PER_REQUEST
       KeySchema:
         - AttributeName: assetname
@@ -53,7 +53,7 @@ Resources:
   ContentManagementDB:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: 00001_ContentManagement
+      TableName: 00002_ContentManagement
       BillingMode: PAY_PER_REQUEST
       KeySchema:
         - AttributeName: endtimeepoch
@@ -105,6 +105,8 @@ Resources:
           - Effect: Allow
             Action:
               - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
             Resource:
               - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
           - Effect: Allow
@@ -153,16 +155,20 @@ Resources:
       Handler: index.lambda_handler
       Timeout: 10
       MemorySize: 10240
+      Environment:
+        Variables:
+          SLIDING_WINDOW: 30
+          CDN: !Ref CloudFrontDistributionDomainName
       Code:
         S3Bucket: !Ref S3BucketDeployedByVodSolution
         S3Key: !GetAtt FileMover.hls_vod_linearizer
       Tags:
         - Key: StackName
           Value: !Ref AWS::StackName
-      DependsOn:
-        - LambdaRole
-        - FileCopier
-        - FileMover
+    DependsOn:
+      - LambdaRole
+      - FileCopier
+      - FileMover
 
 
   VodContentIngest: # Adapt lambda for MediaConvert trigger. get tags also
@@ -179,14 +185,15 @@ Resources:
         S3Key: !GetAtt FileMover.vod-content-ingest
       Environment:
         Variables:
-          CONTENT_MANAGEMENT_DB: !Ref ContentLibraryDB
+          CONTENT_MANAGEMENT_DB: !Ref ContentManagementDB
+          CONTENT_LIBRARY_DB: !Ref ContentLibraryDB
       Tags:
         - Key: StackName
           Value: !Ref AWS::StackName
-      DependsOn:
-        - LambdaRole
-        - FileCopier
-        - FileMover
+    DependsOn:
+      - LambdaRole
+      - FileCopier
+      - FileMover
 
   FileCopier:
     Type: AWS::Lambda::Function
@@ -233,7 +240,7 @@ Resources:
           import urllib3
           from urllib.parse import urlparse
           from zipfile import ZipFile
-          #import cfnresponse
+          import cfnresponse
 
           LOGGER = logging.getLogger()
           LOGGER.setLevel(logging.INFO)
@@ -296,7 +303,7 @@ Resources:
                 if get_response.status != 200:
                     # Exit the script with errors
                     responseData['Status'] = "Unable to get file from location : %s " % (file)
-                    #cfnresponse.send(event, context, "FAILED",responseData)
+                    cfnresponse.send(event, context, "FAILED",responseData)
                     raise Exception("Unable to get file from location : %s " % (file))
                 elif "http" in file:
 
@@ -357,7 +364,7 @@ Resources:
                         except Exception as e:
                             LOGGER.error("Unable to upload %s to S3, got exception: %s" % (file_name,e))
                             responseData['Status'] = "Unable to upload %s to S3, got exception: %s" % (file_name,e)
-                            #cfnresponse.send(event, context, "FAILED",responseData)
+                            cfnresponse.send(event, context, "FAILED",responseData)
                             raise Exception("Unable to upload %s to S3, got exception: %s" % (file_name,e))
 
                     else: # DELETE
@@ -367,11 +374,11 @@ Resources:
                         except Exception as e:
                             LOGGER.error("Unable to delete %s from S3, got exception: %s" % (file_name,e))
                             responseData['Status'] = "Unable to delete %s from S3, got exception: %s" % (file_name,e)
-                            #cfnresponse.send(event, context, "FAILED",responseData)
+                            cfnresponse.send(event, context, "FAILED",responseData)
                 else:
                     LOGGER.info("Got line in manifest.txt that isn't a URL: %s " % (file))
             responseData['Status'] = "SUCCESS"
-            #cfnresponse.send(event, context, "SUCCESS",responseData)
+            cfnresponse.send(event, context, "SUCCESS",responseData)
             return responseData
 
       Environment:
@@ -423,7 +430,7 @@ Resources:
       Name: !Sub ${AWS::StackName}-VodLinearizerWorkflow
       Targets:
         - Id: !Sub ${AWS::StackName}-VodContentIngestLambda
-          Arn: !Ref VodContentIngest
+          Arn: !GetAtt VodContentIngest.Arn
 
 #################################
 # Outputs
