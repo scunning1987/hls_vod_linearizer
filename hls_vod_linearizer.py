@@ -105,7 +105,7 @@ def lambda_handler(event, context):
         path_to_object = asseturl.rsplit("/",1)[0] + "/"
 
         try:
-            LOGGER.info("Getting object from S3")
+            LOGGER.debug("Getting object from S3 : %s" % (path_to_object))
             response = s3_client.get_object(Bucket=asset_bucket,Key=asset_key)
         except Exception as e:
             LOGGER.error("Unable to get object from S3, got exception: %s " % (e))
@@ -124,19 +124,22 @@ def lambda_handler(event, context):
         master_manifest_client_id = master_manifest_original.replace(".m3u8",".m3u8?client_id=%s" % (client_id))
         return {"master_manifest_client_id":master_manifest_client_id,"rendition_list":rendition_list}
 
+
+
     def manifestLinearizer(schedule,time_window_start,time_window_end,rendition_number):
         LOGGER.debug("Performing manifest stitching")
         # session_start_epoch
         # sliding_window
         media_sequence = 1
 
-        assetstartepoch = session_start_epoch - 18
-        total_loops = 0
-        older_child_manifest = []
-        older_child_manifest.clear()
-        new_child_manifest = []
-        old_child_manifest = []
-        older_manifest_loop = False
+        assetstartepoch = session_start_epoch
+        total_loops_for_discontinuity_sequence = 0
+
+        manifest_constructor = dict()
+        manifest_constructor['media_sequence'] = media_sequence
+        manifest_constructor['discontinuity_sequence'] = total_loops_for_discontinuity_sequence
+        manifest_constructor_segments = []
+
 
         for item in schedule:
             endtimeepoch = int(item['EndTimeEpoch'])
@@ -164,279 +167,184 @@ def lambda_handler(event, context):
                     cdn_no_protocol = cdn_base_url.replace("https://","").replace("http://","")
 
                     child_url = "https://%s/%s" % (cdn_no_protocol,path_to_segments)
+
                 else:
                     # assume clients can get directly from S3
                     bucket_region = "us-west-2"
-                    child_url = "https://%s.s3.%s.amazonaws.com/%s" (asset_bucket,bucket_region,path_to_segments)
+                    child_url = "https://%s.s3.%s.amazonaws.com/%s" % (asset_bucket,bucket_region,path_to_segments)
 
 
                 try:
-                    LOGGER.info("Getting object from S3")
+                    LOGGER.debug("Getting object from S3: %s " % (asset_key))
                     response = s3_client.get_object(Bucket=asset_bucket,Key=asset_key)
                 except Exception as e:
                     LOGGER.error("Unable to get object from S3, got exception: %s " % (e))
                     exceptions.append("Unable to get object from S3, got exception: %s " % (e))
-                    return errorOut("#EXT-X-STATUS: ERROR - UNABLE TO GET MASTER MANIFEST FROM ORIGIN")
+                    return errorOut("#EXT-X-STATUS: ERROR - UNABLE TO GET MANIFEST FROM ORIGIN")
 
                 childmanifestraw = response['Body'].read().decode('utf-8')
+                child_headers_list = childmanifestraw.split("#")[0:4]
+                #for manifest_line in child_manifest_list:
 
-                child_url = child_full_url.rsplit('/', 1)[0] + "/"
+
+                ###
+                ###
+                ###
+
+                def manifest_iterator(manifest_start_seconds,manifest_end_seconds,segments,oldest_loop):
+
+                    manifest_start = manifest_start_seconds
+                    manifest_end = manifest_end_seconds
+
+                    segment_index = []
+                    segment_index.clear()
+                    extinfstart = []
+                    extinfstart.clear()
+                    LOGGER.debug("segment index : " +str(len(segment_index)))
+                    manifest_timeline = 0
+
+                    for index, line in enumerate(childmanifestraw.split("#")):
+                        if 'EXTINF' in line:
+                            extinfstart.append(index)
+                            manifest_timeline = manifest_timeline + int(line.split(",")[0].split(":")[1])
+
+                            if manifest_timeline >= manifest_start and manifest_timeline <= manifest_end:
+                                segment_index.append(index)
+                                if segments:
+                                    manifest_constructor_segments.append("#"+line)
+
+                    if len(segment_index) == 0:
+                        segments_into_manifest = 0
+                        starting_segment = 0
+                    else:
+                        segments_into_manifest = segment_index[-1] - int(extinfstart[0])
+                        starting_segment = segment_index[0] - int(extinfstart[0])
+
+                    if oldest_loop:
+                        manifest_constructor['media_sequence'] += starting_segment
+                ###
+                ###
+                ###
 
 
                 if endtimeepoch < time_window_start:
+                    LOGGER.debug("Asset finished and is no longer in playlist : %s " % (asseturl))
 
-                    LOGGER.debug("This is a scheduled item that has long since lapsed. need to calculate Media Sequence")
-                    # determine how many loops have fully completed, then pull child to get 'number of segments' into the final loop to finalize the MediaSequence calculation
+                    epoch_end = endtimeepoch
+                    loops_to_epoch_end = math.floor((epoch_end - assetstartepoch) / duration)
+                    manifest_constructor['discontinuity_sequence'] = manifest_constructor['discontinuity_sequence'] + loops_to_epoch_end
 
-                    # This is an asset we're looping and may loop for a while
-                    loops_since_asset_start = math.floor((endtimeepoch - assetstartepoch) / duration)
-                    starting_media_sequence_of_last_loop = loops_since_asset_start * segments
-                    seconds_into_current_loop = endtimeepoch - assetstartepoch - (loops_since_asset_start * duration)
-                    manifest_start = 0
-                    manifest_end = seconds_into_current_loop
-                    segment_index = []
-                    segment_index.clear()
-                    extinfstart = []
-                    extinfstart.clear()
-
-
-                    manifest_timeline = 0
-                    for index, line in enumerate(childmanifestraw.split("#")):
-                        if 'EXTINF' in line:
-                            extinfstart.append(index)
-                            manifest_timeline = manifest_timeline + int(line.split(",")[0].split(":")[1])
-
-                            if manifest_timeline >= manifest_start and manifest_timeline <= manifest_end:
-                                segment_index.append(index)
-
-                    if len(segment_index) == 0:
-                        segments_into_manifest = 0
-                    else:
-                        segments_into_manifest = segment_index[-1] - int(extinfstart[0])
-
-                    media_sequence += starting_media_sequence_of_last_loop + segments_into_manifest
-
-                    assetstartepoch = endtimeepoch
-                    total_loops += loops_since_asset_start+1
-
-
-                if endtimeepoch > time_window_start and endtimeepoch <= time_window_end:
-
-                    LOGGER.debug("This is a scheduled item that we are transitioning from")
-                    # need to create older_child_manifest
-                    # need to calculate MEDIA-SEQUENCE-here - probably the same way as "old_child_manifest" calculates its MediaSequence
-
-                    # This is an asset we're looping and may loop for a while
-                    loops_since_asset_start = math.floor((endtimeepoch - assetstartepoch) / duration)
-
-                    starting_media_sequence_of_last_loop = loops_since_asset_start * segments
-
-                    seconds_into_current_loop = endtimeepoch - assetstartepoch - (loops_since_asset_start * duration)
-
-                    manifest_end = seconds_into_current_loop
-                    manifest_start = requesttime_epoch - assetstartepoch - (loops_since_asset_start * duration) - sliding_window
-                    segment_index = []
-                    segment_index.clear()
-                    extinfstart = []
-                    extinfstart.clear()
-                    #return manifest_start
-
-                    manifest_timeline = 0
+                    starting_media_sequence_of_last_loop = loops_to_epoch_end * segments
                     media_sequence += starting_media_sequence_of_last_loop
+                    manifest_constructor['media_sequence'] = media_sequence
 
-                    ###
-                    older_child_manifest.clear()
-                    if manifest_start < 0: # we were in the middle of a loop on the previous asset. Need to make sure we preserve the older loop
-                        manifest_timeline = 0
-                        old_loop_start = duration + manifest_start
-                        old_loop_end = duration
-                        extinfstart.clear()
+                    manifest_end = epoch_end - assetstartepoch - (loops_to_epoch_end * duration)
+                    manifest_start = 0
 
-                        for index, line in enumerate(childmanifestraw.text.split("#")):
-                            if 'EXTINF' in line:
-                                extinfstart.append(index)
-                                manifest_timeline = manifest_timeline + int(line.split(",")[0].split(":")[1])
+                    manifest_iterator(manifest_start,manifest_end,False,False)
 
 
-                                if manifest_timeline >= old_loop_start and manifest_timeline <= old_loop_end:
-                                    older_child_manifest.append("#"+line.replace("\n",str(media_sequence+int(index)-int(extinfstart[0])-segments)+"\n"+str(child_url),1))
+                if endtimeepoch > time_window_start:
+                    LOGGER.info("getting segments from this asset : %s " % (asseturl))
 
+                    epoch_start = requesttime_epoch - sliding_window
 
-                    if len(older_child_manifest) > 0:
-                        older_manifest_loop = True
-                        older_child_manifest.append("#EXT-X-DISCONTINUITY\n")
+                    if epoch_start < assetstartepoch:
+                        epoch_start = assetstartepoch
+                        #loops_to_epoch_start = 0
 
-
-                    manifest_timeline = 0
-                    segment_index.clear()
-                    extinfstart.clear()
-                    for index, line in enumerate(childmanifestraw.split("#")):
-                        if 'EXTINF' in line:
-                            extinfstart.append(index)
-                            manifest_timeline = manifest_timeline + int(line.split(",")[0].split(":")[1])
-                            if manifest_timeline <= manifest_end:
-                                segment_index.append(index)
-                            if manifest_timeline >= manifest_start and manifest_timeline <= manifest_end:
-                                older_child_manifest.append("#"+line.replace("\n",str(media_sequence+int(index)-int(extinfstart[0]))+"\n"+str(child_url),1))
-
-                    if len(segment_index) == 0:
-                        segments_into_manifest = 0
+                    if requesttime_epoch < endtimeepoch:
+                        epoch_end = requesttime_epoch
                     else:
-                        segments_into_manifest = segment_index[-1] - segment_index[0]
+                        epoch_end = endtimeepoch
+                    loops_to_epoch_start = math.floor((epoch_start - assetstartepoch) / duration)
+                    if loops_to_epoch_start < 0:
+                        loops_to_epoch_start = 0
 
-                    media_sequence += segments_into_manifest
-                    assetstartepoch = endtimeepoch
-
-                    # This is for the discontinuity Media Sequence counter
-                    total_loops += loops_since_asset_start+1
-
-                # this is the current looping asset with no other scheduled item interfering
-                #if endtimeepoch > time_window_start and endtimeepoch > time_window_end:
-                if nowplaying == "True":
-
-                    # This is an asset we're looping and may loop for a while
-                    loops_since_asset_start = math.floor((requesttime_epoch - assetstartepoch) / duration)
-                    starting_media_sequence_of_last_loop = loops_since_asset_start * segments
-
-                    seconds_into_current_loop =  requesttime_epoch - assetstartepoch - (loops_since_asset_start * duration)
-                    manifest_end = seconds_into_current_loop
-                    manifest_start = manifest_end - sliding_window
-                    media_sequence = media_sequence + starting_media_sequence_of_last_loop
-
-                    extinfstart = []
-                    extinfstart.clear()
-
-                    time_watching = requesttime_epoch - sliding_window - session_start_epoch
+                    loops_to_epoch_end = math.floor((epoch_end - assetstartepoch) / duration)
+                    manifest_constructor['discontinuity_sequence'] += loops_to_epoch_start
+                    starting_media_sequence_of_oldest_loop = loops_to_epoch_start * segments
+                    loops_of_asset = math.ceil((epoch_end - epoch_start) / duration)
 
 
-                    if manifest_start < 0 and len(older_child_manifest) == 0 and time_watching > 0:
+                    manifest_constructor['media_sequence'] += starting_media_sequence_of_oldest_loop
 
-                        media_sequence_header = 0
-                        manifest_timeline = 0
-                        old_manifest_start = duration + manifest_start
-                        old_manifest_end = duration
+                    manifest_start_epoch = epoch_start
 
-                        for index, line in enumerate(childmanifestraw.split("#")):
-                            if 'EXTINF' in line:
-                                extinfstart.append(index)
-                                manifest_timeline = manifest_timeline + int(line.split(",")[0].split(":")[1])
+                    manifest_start = epoch_start - assetstartepoch - (loops_to_epoch_start * duration)
 
-                                if manifest_timeline >= old_manifest_start and manifest_timeline <= old_manifest_end:
-                                    old_child_manifest.append("#"+line.replace("\n",str(media_sequence+int(index)-int(extinfstart[0])-segments)+"\n"+str(child_url),1))
-
-                                    if media_sequence_header == 0:
-                                        media_sequence_header = media_sequence+int(index)-int(extinfstart[0])-segments
-
-                        manifest_start = 0
-                        extinfstart.clear()
-                        manifest_timeline = 0
-                        for index, line in enumerate(childmanifestraw.text.split("#")):
-                            if 'EXTINF' in line:
-                                extinfstart.append(index)
-                                manifest_timeline = manifest_timeline + int(line.split(",")[0].split(":")[1])
-
-                                if manifest_timeline >= manifest_start and manifest_timeline <= manifest_end:
-                                    new_child_manifest.append("#"+line.replace("\n",str(media_sequence+int(index)-int(extinfstart[0]))+"\n"+str(child_url),1))
+                    if len(manifest_constructor_segments) > 0:
+                        manifest_constructor_segments.append("#EXT-X-DISCONTINUITY")
 
 
-
-                    else:
-                        '''
-                        testing
-                        '''
-                        if requesttime_epoch - assetstartepoch - duration > 0:
-
-                            older_child_manifest.clear()
-                            if manifest_start < 0: # we were in the middle of a loop on the previous asset. Need to make sure we preserve the older loop
-                                manifest_timeline = 0
-                                if duration + manifest_start < 0:
-                                    old_loop_start = 0
-                                else:
-                                    old_loop_start = duration + manifest_start
-
-                                old_loop_end = duration
-                                extinfstart.clear()
-
-                                for index, line in enumerate(childmanifestraw.split("#")):
-                                    if 'EXTINF' in line:
-                                        extinfstart.append(index)
-                                        manifest_timeline = manifest_timeline + int(line.split(",")[0].split(":")[1])
+                    oldest_loop = True
+                    looper = dict()
+                    for i in range(loops_of_asset,-1,-1):
+                        if i == 0:
+                            manifest_end = epoch_end - assetstartepoch - (loops_to_epoch_end * duration)
+                        else:
+                            manifest_end = duration
 
 
-                                        if manifest_timeline >= old_loop_start and manifest_timeline <= old_loop_end:
-                                            older_child_manifest.append("#"+line.replace("\n",str(media_sequence+int(index)-int(extinfstart[0])-segments)+"\n"+str(child_url),1))
+                        LOGGER.debug("loop iteration : %s , manifest_start : %s , manifest_end : %s " % (str(i),str(manifest_start),str(manifest_end)) )
 
-                        '''
-                        testing
-                        '''
+                        looper[str(i)] = {
+                            "start":manifest_start,
+                            "end":manifest_end,
+                            "duration":manifest_end-manifest_start,
+                            "epoch": epoch_start + manifest_start
 
-                        media_sequence_header = 0
-                        manifest_timeline = 0
-                        extinfstart.clear()
-                        manifest_timeline = 0
-                        for index, line in enumerate(childmanifestraw.split("#")):
-                            if 'EXTINF' in line:
-                                extinfstart.append(index)
-                                manifest_timeline = manifest_timeline + int(line.split(",")[0].split(":")[1])
+                        }
 
-                                if manifest_timeline >= manifest_start and manifest_timeline <= manifest_end:
-                                    new_child_manifest.append("#"+line.replace("\n",str(media_sequence+int(index)-int(extinfstart[0]))+"\n"+str(child_url),1))
+                        manifest_iterator(manifest_start,manifest_end,True,oldest_loop)
+                        LOGGER.debug("manifest_start:%s,manifest_end:%s" % (manifest_start,manifest_end))
 
-                                    if media_sequence_header == 0:
-                                        media_sequence_header = media_sequence+int(index)-int(extinfstart[0])
-                    ###
+                        #oldest_loop = False
 
+                        if i > 0:
+                            manifest_start = 0
+                            manifest_constructor_segments.append("#EXT-X-DISCONTINUITY")
+                        oldest_loop = False
+                    LOGGER.warning(looper)
+                assetstartepoch = endtimeepoch
 
 
-                #else:
-                #    return errorOut("#EXT-X-STATUS: ERROR STITCHING MANIFEST")
+        if manifest_constructor_segments[-1] == "#EXT-X-DISCONTINUITY":
+            manifest_constructor_segments.pop(-1)
 
-        ## Add a discontinuity if needed
-        if len(older_child_manifest) > 0:
-            if media_sequence_header == 0: # this is a scenario during a transition and there are no new segments being populated yet
-                media_sequence_header = media_sequence
-            if older_manifest_loop:
-                media_sequence_header += 1
-            media_sequence_header -= len(older_child_manifest)
-            if len(new_child_manifest) > 0:
-                older_child_manifest.append("#EXT-X-DISCONTINUITY\n")
-        if len(old_child_manifest) > 0 and len(new_child_manifest) > 0:
-            old_child_manifest.append("#EXT-X-DISCONTINUITY\n")
+        manifest_constructor['discontinuity_sequence'] = manifest_constructor['discontinuity_sequence'] + manifest_constructor_segments.count("#EXT-X-DISCONTINUITY")
+        manifest_constructor['segments'] = manifest_constructor_segments
 
-        #media_sequence_header += 1
-        ## Configure child headers
-        child_headers_list = childmanifestraw.text.split("#")[0:4]
-        line_num = 0
-        for header in child_headers_list:
-            if "DURATION" in header:
-                #"EXT-X-TARGETDURATION:7\n"
-                dur_with_newline = header.split(":")[1]
-                dur = dur_with_newline.split("\n")[0]
-                child_headers_list[line_num] = header.replace(dur,str(int(int(dur)-1)))
-            line_num += 1
+        #return len(manifest_constructor['segments']) - manifest_constructor['segments'].count("#EXT-X-DISCONTINUITY")
 
-        # join headers together and create MediaSequence header
+        #media_sequence = manifest_constructor['media_sequence'] - len(manifest_constructor['segments']) + manifest_constructor['segments'].count("#EXT-X-DISCONTINUITY")
+        media_sequence = manifest_constructor['media_sequence']
+        ## Construct manifest
+
+
+        ## HEADERS
         child_headers = '#'.join(child_headers_list)
-        child_headers += "#EXT-X-MEDIA-SEQUENCE:"+str(media_sequence_header)+"\n"
+        child_headers += "#EXT-X-MEDIA-SEQUENCE:"+str(media_sequence)+"\n"
+        if manifest_constructor['discontinuity_sequence'] > 0:
+            child_headers += "#EXT-X-DISCONTINUITY-SEQUENCE:%s\n" % (str(manifest_constructor['discontinuity_sequence']))
 
-        # Add Discontinuity Sequence header is loops have occurred
-        combined_loops = total_loops + loops_since_asset_start
+        ## SEGMENTS in Manifest
 
-        if combined_loops > 0:
-            child_headers += "#EXT-X-DISCONTINUITY-SEQUENCE:%s\n" % (str(combined_loops))
+        new_child_manifest = []
+        for line in manifest_constructor['segments']:
+            if "EXTINF" in line:
+                new_child_manifest.append(line.replace("\n",str(media_sequence)+"\n"+str(child_url),1))
+                media_sequence += 1
+            else:
+                new_child_manifest.append(line+"\n")
+
+
 
         # Stitch headers + old and new manifest
-        child_manifest = child_headers + ''.join(older_child_manifest) + ''.join(old_child_manifest) + ''.join(new_child_manifest)
+        child_manifest = child_headers + ''.join(new_child_manifest)
 
         return child_manifest
 
-        '''
-        session_start_epoch = int(session_start_epoch['Item']['session_start']['N'])
-        #requesttime_epoch
-        loops_since_session_start = math.floor((requesttime_epoch - session_start_epoch) / int(now_and_future_playing[now_play]['AssetDuration']))
-        starting_media_sequence_of_current_loop = loops_since_session_start * int(now_and_future_playing[now_play]['AssetSegments']
-        seconds_into_loop = requesttime_epoch - session_start_epoch - (loops_since_session_start*int(now_and_future_playing[now_play]['AssetDuration']))
-        '''
 
 
     def errorOut(message):
@@ -457,6 +365,7 @@ def lambda_handler(event, context):
         '''
         ## Get Items from DB
         getItemToPlayResponse = dbGetItemToPlay(content_management_db)
+
         if len(exceptions) > 0:
             return errorOut("#EXT-X-STATUS: %s" % (exceptions))
 
@@ -503,7 +412,7 @@ def lambda_handler(event, context):
 
     requesttime_iso8601 = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
     requesttime_epoch = int(datetime.datetime.utcnow().strftime('%s'))
-    #requesttime_epoch = 1623363467
+    #requesttime_epoch = 1631849400
     ### Creating global variables - END
 
     # check request length first
@@ -544,6 +453,7 @@ def lambda_handler(event, context):
         # Get master manifest from current playing asset
         # use requesttime_epoch to check content_management_db
         now_and_future_playing = nowPlaying(content_management_db,requesttime_epoch)
+
         now_and_future_playing = sorted(now_and_future_playing, key=lambda k: k['EndTimeEpoch'])
 
         # Get Master manifest and populate query strings

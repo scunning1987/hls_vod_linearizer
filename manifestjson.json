@@ -1,0 +1,36 @@
+{
+  "media_sequence": 0,
+  "discontinuity_sequence": 0,
+  "manifest_loops": {
+    "1": {
+      "asseturl": "asseturl",
+      "starting_segment": 3,
+      "end_segment": 6,
+      "segments":[
+        "seg1.ts",
+        "seg2.ts",
+        "seg3.ts"
+      ]
+    },
+    "2": {
+      "asseturl": "asseturl",
+      "starting_segment": 3,
+      "end_segment": 6,
+      "segments":[
+        "seg1.ts",
+        "seg2.ts",
+        "seg3.ts"
+      ]
+    },
+    "3": {
+      "asseturl": "asseturl",
+      "starting_segment": 3,
+      "end_segment": 6,
+      "segments":[
+        "seg1.ts",
+        "seg2.ts",
+        "seg3.ts"
+      ]
+    }
+  }
+}

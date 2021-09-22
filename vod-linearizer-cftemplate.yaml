@@ -10,6 +10,35 @@ Parameters:
     Description: Enter the bucket name of the S3 bucket created by the VOD on AWS solution, alternatively, enter another bucket in the same account. This bucket will host the Lambda function files (the size requirement is very small)
     Type: String
 
+  S3BucketRegion:
+    Description: Select the region that the bucket was deployed into
+    Type: String
+    Default: us-west-2
+    AllowedValues:
+    - us-east-2
+    - us-east-1
+    - us-west-1
+    - us-west-2
+    - af-south-1
+    - ap-east-1
+    - ap-south-1
+    - ap-northeast-3
+    - ap-northeast-2
+    - ap-southeast-1
+    - ap-southeast-2
+    - ap-northeast-1
+    - ca-central-1
+    - eu-central-1
+    - eu-west-1
+    - eu-west-2
+    - eu-south-1
+    - eu-west-3
+    - eu-north-1
+    - me-south-1
+    - sa-east-1
+    - us-gov-east-1
+    - us-gov-west-1
+
   S3PolicyForMediaAccess:
     Description: Policy that gives Lambda access to customer managed S3 Bucket
     Type: String
@@ -121,15 +150,25 @@ Resources:
               #  !GetAtt ContentLibraryDB.Arn
               #  !GetAtt ContentManagementDB.Arn
 
-  #LambdaInvokePermissionAPIGateway:
-  #  Type: AWS::Lambda::Permission
-  #  Properties:
-  #    FunctionName: !GetAtt VodLinearizer.Arn
-  #    Action: lambda:InvokeFunction
-  #    Principal: apigateway.amazonaws.com
-  #    SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/*"
-  #  DependsOn:
-  #    - VodLinearizer
+  LambdaInvokePermissionAPIGateway:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt VodLinearizer.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !GetAtt MediaConvertCompletionEvent.Arn
+    DependsOn:
+      - VodLinearizer
+
+  EventBridgeInvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt VodContentIngest.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/${MediaConvertCompletionEvent}"
+    DependsOn:
+      - MediaConvertCompletionEvent
 
 #################
 ## Custom Resource
@@ -398,11 +437,113 @@ Resources:
 #
 ## Proxy API Endpoint
 
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub ${AWS::StackName}-vod-linearizer-api-endpoint
+      Description: !Sub API Handler [${AWS::StackName}
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Tags:
+        - Key: StackName
+          Value: !Ref AWS::StackName
 
+  ProxyPlusResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: '{proxy+}'
+      RestApiId: !Ref ApiGateway
+    DependsOn:
+      - ApiGateway
 
-#
+  AnyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: ANY
+      Integration:
+        #Credentials: !GetAtt ApiGatewayRole.Arn
+        IntegrationHttpMethod: POST
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,PUT,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            StatusCode: '301'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,PUT,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            StatusCode: '404'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,PUT,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        Type: AWS_PROXY
+        Uri: !Join
+          - ''
+          - - 'arn:aws:apigateway:'
+            - !Ref 'AWS::Region'
+            - :lambda:path/2015-03-31/functions/
+            - !GetAtt VodLinearizer.Arn
+            - /invocations
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/vnd.apple.mpegURL: !Ref EmptyResponseModel
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: true
+        - StatusCode: 301
+          ResponseModels:
+            application/vnd.apple.mpegURL: !Ref EmptyResponseModel
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: true
+        - StatusCode: 404
+          ResponseModels:
+            application/vnd.apple.mpegURL: !Ref EmptyResponseModel
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: true
+      ResourceId: !Ref ProxyPlusResource
+      RestApiId: !Ref ApiGateway
+    DependsOn:
+      - ApiGateway
+
+  EmptyResponseModel:
+    Type: AWS::ApiGateway::Model
+    Properties:
+      ContentType: application/vnd.apple.mpegURL
+      RestApiId: !Ref ApiGateway
+      Schema: {}
+
+  Deployment:
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      Description: Production Deployment of Api Endpoint
+      RestApiId: !Ref ApiGateway
+    DependsOn:
+      - AnyMethod
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      DeploymentId: !Ref Deployment
+      RestApiId: !Ref ApiGateway
+      StageName: v1
+    DependsOn:
+      - ApiGateway
+
+###
 # EventBridge
-#
+###
 ## Events for EMC job completion (that follow a certain TAG)
 
   MediaConvertCompletionEvent:
@@ -437,6 +578,6 @@ Resources:
 #################################
 
 Outputs:
-  Test:
-    Description: test
-    Value: test
+  ChannelPlaybackTemplate:
+    Description: The URL template for playback of linear channels
+    Value: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${ApiStage}/[Customer-ID]/[CHANNEL-NAME].m3u8
