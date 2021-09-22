@@ -156,7 +156,7 @@ Resources:
       FunctionName: !GetAtt VodLinearizer.Arn
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
-      SourceArn: !GetAtt MediaConvertCompletionEvent.Arn
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/*"
     DependsOn:
       - VodLinearizer
 
